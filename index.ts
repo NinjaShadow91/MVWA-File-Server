@@ -6,59 +6,59 @@ import { pbkdf2Sync, randomUUID } from "crypto";
 import Url from "url";
 import tus from "tus-node-server";
 
+import express from "express";
+import fileUpload from "express-fileupload";
+import cors from "cors";
+import bodyParser from "body-parser";
+import morgan from "morgan";
+
 const prisma = new PrismaClient();
 const ITERATIONS = 10;
-const base = "./images";
+const base = "/home/college/New/Code/Web/mvwaFileServer/images/";
 
-async function handleUpload(req: http.IncomingMessage) {
-  const token = Url.parse(req.url ?? "", true).query.token;
-  if (token && typeof token === "string") {
-    const derivedToken = pbkdf2Sync(
-      token,
-      "",
-      ITERATIONS,
-      64,
-      "sha512"
-    ).toString("hex");
+async function handleUpload(token: string) {
+  if (!token) return;
+  const derivedToken = pbkdf2Sync(token, "", ITERATIONS, 64, "sha512").toString(
+    "hex"
+  );
 
-    const verificationToken = await prisma.verificationToken.findUnique({
-      where: {
-        token: derivedToken,
-      },
-    });
+  const verificationToken = await prisma.verificationToken.findUnique({
+    where: {
+      token: derivedToken,
+    },
+  });
 
-    if (
-      verificationToken &&
-      verificationToken.type === "IMAGE_OPERATION" &&
-      verificationToken.expires > new Date()
-    ) {
-      const url = base.concat(randomUUID());
-      await prisma.$transaction([
-        prisma.media.update({
-          where: {
-            mediaId: verificationToken.identifier,
-          },
-          data: {
-            url: url,
-            Type: {
-              connect: {
-                name: "image/jpeg",
-              },
+  if (
+    verificationToken &&
+    verificationToken.type === "IMAGE_OPERATION" &&
+    verificationToken.expires > new Date()
+  ) {
+    const url = base.concat(randomUUID());
+    await prisma.$transaction([
+      prisma.media.update({
+        where: {
+          mediaId: verificationToken.identifier,
+        },
+        data: {
+          url: url,
+          Type: {
+            connect: {
+              name: "image/jpeg",
             },
           },
-        }),
-        prisma.verificationToken.update({
-          where: {
-            token: derivedToken,
-          },
-          data: {
-            type: "IMAGE_OPERATION_USED",
-          },
-        }),
-      ]);
+        },
+      }),
+      prisma.verificationToken.update({
+        where: {
+          token: derivedToken,
+        },
+        data: {
+          type: "IMAGE_OPERATION_USED",
+        },
+      }),
+    ]);
 
-      return url;
-    }
+    return { url, mediaId: verificationToken.identifier };
   }
 }
 
@@ -86,9 +86,16 @@ async function handleRetrieve(
         },
       });
       if (media) {
-        const file = fs.createReadStream(base.concat(media.url));
+        const file = fs.createReadStream(media.url);
         res.setHeader("Content-Type", media.Type.name);
         file.pipe(res);
+        file.on("error", (err) => {
+          res.setHeader("Content-Type", "application/json");
+          res.write(
+            JSON.stringify({ sucess: false, message: "Something went bad" })
+          );
+          res.end();
+        });
       } else {
         res.write(JSON.stringify({ sucess: false, message: "NOT FOUND" }));
         res.end();
@@ -109,77 +116,82 @@ async function handleRetrieve(
   }
 }
 
-const tusServer = new tus.Server({
-  path: "./files",
-  // namingFunction: handleUpload,
-});
-tusServer.datastore = new tus.FileStore({ directory: "./files" });
+const app = express();
 
-tusServer.on("EVENT_FILE_CREATED", async (file, req) => {
-  console.log("check2");
-  await handleUpload(req);
-});
+app.use(
+  fileUpload({
+    createParentPath: true,
+  })
+);
 
-tusServer.on("EVENT_ENDPOINT_CREATED", () => {
-  console.log("check3");
-});
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(morgan("dev"));
 
-http
-  .createServer(async function (req, res) {
-    console.log("req", Date(), req.url, req.headers);
+const port = process.env.PORT || 8080;
 
-    if (req.url?.startsWith("/fileUpload")) {
-      // const token = Url.parse(req.url ?? "", true).query.token;
-      const tokenHeader = req.headers["access-control-request-headers"]
-        ?.split(",")
-        .filter((h) => h.startsWith("token"))[0];
-      const token = tokenHeader?.substring(5);
-      if (token && typeof token === "string") {
-        const derivedToken = pbkdf2Sync(
-          token,
-          "",
-          ITERATIONS,
-          64,
-          "sha512"
-        ).toString("hex");
-        console.log("req", Date(), derivedToken);
+app.listen(port, () => console.log(`App is listening on port ${port}.`));
 
-        const verificationToken = await prisma.verificationToken.findUnique({
-          where: {
-            token: derivedToken,
-          },
-        });
+app.post("/fileUpload/", async (req, res) => {
+  try {
+    console.log(req.body);
+    if (!req.files) {
+      res.send({
+        status: false,
+        message: "No file uploaded",
+      });
+      res.end();
+      return;
+    } else {
+      let data: {
+        name: string;
+        mimetype: string;
+        size: number;
+        mediaId: String;
+      }[] = [];
 
-        if (
-          verificationToken &&
-          verificationToken.type === "IMAGE_OPERATION" &&
-          verificationToken.expires > new Date()
-        ) {
-          console.log("ech");
-          return tusServer.handle(req, res);
+      if (!Array.isArray(req.files.file)) {
+        const url = await handleUpload(req.body.token);
+        if (url) {
+          req.files.file.mv(url.url);
+          data.push({
+            name: req.files.file.name,
+            mimetype: req.files.file.mimetype,
+            size: req.files.file.size,
+            mediaId: url.mediaId,
+          });
         } else {
-          res.setHeader("Content-Type", "application/json");
-          res.write(JSON.stringify({ sucess: false, message: "Unauthorized" }));
+          // console.log("UNAUTHORIZED");
+          res.status(403).send({ sucess: false, message: "BAD REQUEST" });
           res.end();
           return;
         }
+        res.send({
+          status: true,
+          message: "Files are uploaded",
+          data: data,
+        });
       } else {
-        res.setHeader("Content-Type", "application/json");
-        res.write(JSON.stringify({ sucess: false, message: "Bad Request" }));
-        res.end();
-        return;
+        //loop all files
+        req.files.file.forEach(async (file) => {
+          // implement
+        });
+
+        //return response
+        res.send({
+          status: true,
+          message: "Files are uploaded",
+          data: data,
+        });
       }
-    } else if (req.url?.startsWith("/fileRetrieve")) {
-      await handleRetrieve(req, res);
-    } else {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.write(
-        '<form action="fileupload" method="post" enctype="multipart/form-data">'
-      );
-      res.write('<input type="file" name="filetoupload"><br>');
-      res.write('<input type="submit">');
-      res.write("</form>");
-      return res.end();
     }
-  })
-  .listen(8080);
+  } catch (err) {
+    console.log(err);
+    res.status(500).send(err);
+  }
+});
+
+app.get("/fileRetrieve/", async (req, res) => {
+  handleRetrieve(req, res);
+});
