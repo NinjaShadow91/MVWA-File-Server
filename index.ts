@@ -14,7 +14,7 @@ import morgan from "morgan";
 
 const prisma = new PrismaClient();
 const ITERATIONS = 10;
-const base = "/home/college/New/Code/Web/mvwaFileServer/images/";
+const base = "/home/college/Ninja/Trying../New/Code/Web/mvwaFileServer/images/";
 
 async function handleUpload(token: string) {
   if (!token) return;
@@ -86,7 +86,15 @@ async function handleRetrieve(
         },
       });
       if (media) {
-        const file = fs.createReadStream(media.url);
+        let filePath = "";
+        if (media.url.startsWith(base)) filePath = media.url;
+        else if (media.url.startsWith("/"))
+          filePath = base.concat(media.url.substring(1));
+        else
+          filePath = base.concat(
+            media.url.split("/")[media.url.split("/").length - 1]
+          );
+        const file = fs.createReadStream(filePath);
         res.setHeader("Content-Type", media.Type.name);
         file.pipe(res);
         file.on("error", (err) => {
